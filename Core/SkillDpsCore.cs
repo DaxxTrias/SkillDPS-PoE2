@@ -2,9 +2,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
-using System.Windows.Forms;
 using ExileCore2;
-using ExileCore2.PoEMemory;
+using ExileCore2.PoEMemory.Components;
+using ExileCore2.PoEMemory.Elements;
 using ExileCore2.PoEMemory.MemoryObjects;
 using ExileCore2.Shared;
 using ExileCore2.Shared.Cache;
@@ -15,7 +15,8 @@ namespace Skill_DPS.Core;
 public class SkillDpsCore : BaseSettingsPlugin<Settings>
 {
     private readonly List<SkillData> _activeSkills = [];
-    private TimeCache<bool>? _cachedValue;
+    private TimeCache<bool>? _skillUpdateCache;
+    private bool _loggedMissingSkillBar;
 
     public SkillDpsCore()
     {
@@ -24,90 +25,180 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
 
     public override void OnLoad()
     {
-        Input.RegisterKey(Keys.LControlKey);
-        _cachedValue = new TimeCache<bool>(ProcessSkillDPS, Settings.UpdateInterval);
-        Settings.UpdateInterval.OnValueChanged += (sender, interval) => _cachedValue?.NewTime(interval);
+        _skillUpdateCache = new TimeCache<bool>(RefreshSkillDps, Settings.UpdateInterval);
+        Settings.UpdateInterval.OnValueChanged += (_, _) => _skillUpdateCache?.NewTime(Settings.UpdateInterval);
     }
 
-    private bool ProcessSkillDPS()
+    public override void AreaChange(AreaInstance area)
     {
-        var skillBar = RemoteMemoryObject.GameController.IngameState.IngameUi.SkillBar;
-        var hoverUI = GameController.Game.IngameState.UIHoverTooltip.Tooltip;
+        _loggedMissingSkillBar = false;
+        _activeSkills.Clear();
+    }
 
-        if (skillBar?.Skills == null || skillBar.Skills.Count == 0)
+    private bool RefreshSkillDps()
+    {
+        _activeSkills.Clear();
+
+        if (!Settings.Enable)
+            return true;
+
+        var ingameUi = GameController.Game.IngameState.IngameUi;
+        var skillBar = ingameUi.SkillBar;
+        if (skillBar is not { Address: not 0, IsValid: true })
         {
-            LogError("SkillBar or Skills collection is invalid");
-            return false;
+            LogMissingSkillBarOnce();
+            return true;
         }
 
-        _activeSkills.Clear();
-        foreach (var skillElement in skillBar.Skills)
+        var skillElements = GetSkillElements(skillBar);
+        if (skillElements.Count == 0)
         {
-            if (skillElement?.Skill == null) continue;
+            LogMissingSkillBarOnce();
+            return true;
+        }
 
-            var elementRect = skillElement.GetClientRect();
-            var displayRect = new RectangleF(elementRect.X, elementRect.Y - 2, elementRect.Width, -Settings.FontSize);
+        var hoverTooltip = GameController.Game.IngameState.UIHover.Tooltip;
+        var actor = GameController.Player?.GetComponent<Actor>();
 
-            if (hoverUI != null && hoverUI.GetClientRect().Intersects(displayRect) && hoverUI.IsVisibleLocal)
+        for (var slotIndex = 0; slotIndex < skillElements.Count; slotIndex++)
+        {
+            var skillElement = skillElements[slotIndex];
+            if (skillElement is not { Address: not 0, IsValid: true })
                 continue;
 
-            var damageValue = CalculateSkillDamage(skillElement.Skill);
-            if (damageValue == 0) continue;
+            var actorSkill = ResolveActorSkill(skillElement, actor, slotIndex);
+            if (actorSkill == null)
+                continue;
+
+            var elementRect = skillElement.GetClientRectCache;
+            if (elementRect.Width <= 1 || elementRect.Height <= 1)
+                continue;
+
+            var labelHeight = Settings.FontSize;
+            var displayRect = new RectangleF(
+                elementRect.X,
+                elementRect.Y - labelHeight - 2f,
+                elementRect.Width,
+                labelHeight);
+
+            if (hoverTooltip is { IsVisibleLocal: true } &&
+                hoverTooltip.GetClientRectCache.Intersects(displayRect))
+                continue;
+
+            var damageValue = CalculateSkillDamage(actorSkill);
+            if (damageValue <= 0)
+                continue;
 
             _activeSkills.Add(new SkillData
             {
                 SkillElement = skillElement,
                 Value = damageValue,
                 DisplayBox = displayRect,
-                DisplayPosition = new Vector2(displayRect.Center.X, displayRect.Center.Y - Settings.FontSize / 2f)
+                DisplayPosition = new Vector2(displayRect.Center.X, displayRect.Top + labelHeight * 0.5f)
             });
         }
 
         return true;
     }
 
-    private decimal CalculateSkillDamage(ActorSkill skill)
+    private static List<SkillElement> GetSkillElements(SkillBarElement skillBar)
     {
+        var skills = skillBar.Skills;
+        if (skills is { Count: > 0 })
+            return skills;
+
+        var fromChildren = new List<SkillElement>(skillBar.Children.Count);
+        foreach (var child in skillBar.Children)
+        {
+            if (child is not { Address: not 0, IsValid: true })
+                continue;
+
+            var skillElement = child as SkillElement ?? child.GetChildAtIndex(0)?.AsObject<SkillElement>();
+            if (skillElement is { Address: not 0, IsValid: true })
+                fromChildren.Add(skillElement);
+        }
+
+        return fromChildren;
+    }
+
+    private static ActorSkill? ResolveActorSkill(SkillElement skillElement, Actor? actor, int slotIndex)
+    {
+        if (skillElement.Skill is { Address: not 0 } skillFromElement)
+            return skillFromElement;
+
+        if (actor == null)
+            return null;
+
+        var indexedSlot = skillElement.IndexInParent ?? slotIndex;
+        return actor.ActorSkills.FirstOrDefault(skill =>
+            skill.IsOnSkillBar && skill.SkillSlotIndex == indexedSlot);
+    }
+
+    private static decimal CalculateSkillDamage(ActorSkill skill)
+    {
+        var dps = skill.Dps;
+        if (dps > 0)
+            return (decimal)dps;
+
         var stats = skill.Stats;
+        if (stats == null || stats.Count == 0)
+            return 0;
 
-        if (stats.TryGetValue(GameStat.HundredTimesDamagePerSecond, out var dps))
-            return dps / 100m;
+        if (stats.TryGetValue(GameStat.HundredTimesDamagePerSecond, out var hundredTimesDps))
+            return hundredTimesDps / 100m;
 
-        if (stats.TryGetValue(GameStat.HundredTimesAttacksPerSecond, out var aps))
-            return aps / 100m;
+        if (stats.TryGetValue(GameStat.HundredTimesAttacksPerSecond, out var attacksPerSecond))
+            return attacksPerSecond / 100m;
 
-        if (stats.TryGetValue(GameStat.HundredTimesAverageDamagePerSkillUse, out var avgDmg))
-            return avgDmg / 100m;
+        if (stats.TryGetValue(GameStat.HundredTimesAverageDamagePerSkillUse, out var averageDamage))
+            return averageDamage / 100m;
 
-        if (stats.TryGetValue(GameStat.IntermediaryFireSkillDotDamageToDealPerMinute, out var dotDmg))
-            return dotDmg / 60m;
+        if (stats.TryGetValue(GameStat.IntermediaryFireSkillDotDamageToDealPerMinute, out var dotPerMinute))
+            return dotPerMinute / 60m;
 
-        if (stats.TryGetValue(GameStat.BaseSkillShowAverageDamageInsteadOfDps, out var baseDmg))
-            return baseDmg / 100m;
+        if (stats.TryGetValue(GameStat.BaseSkillShowAverageDamageInsteadOfDps, out var averageInsteadOfDps))
+            return averageInsteadOfDps / 100m;
 
         return 0;
     }
 
     public override void Render()
     {
-        if (_cachedValue?.Value != true) return;
+        if (!Settings.Enable)
+            return;
 
-        foreach (var skill in _activeSkills.Where(skill =>
-                     skill.DisplayBox.Location != Vector2.Zero && skill.SkillElement.IsVisible))
+        _ = _skillUpdateCache?.Value;
+
+        foreach (var skill in _activeSkills)
         {
-            Graphics.DrawText(FormatDamageValue(skill.Value), skill.DisplayPosition, Settings.FontColor,
+            if (!skill.SkillElement.IsVisibleLocal)
+                continue;
+
+            Graphics.DrawText(
+                FormatDamageValue(skill.Value),
+                skill.DisplayPosition,
+                Settings.FontColor,
                 FontAlign.Center);
             Graphics.DrawBox(skill.DisplayBox, Settings.BackgroundColor);
             Graphics.DrawFrame(skill.DisplayBox, Settings.BorderColor, 1);
         }
     }
 
+    private void LogMissingSkillBarOnce()
+    {
+        if (_loggedMissingSkillBar)
+            return;
+
+        _loggedMissingSkillBar = true;
+        LogError("Skill bar was not available yet (hidden UI, loading, or town). Labels appear once combat skills are visible.");
+    }
+
     private static string FormatDamageValue(decimal value)
     {
         return value switch
         {
-            > 999999999 => value.ToString("0,,,.###B", CultureInfo.InvariantCulture),
-            > 999999 => value.ToString("0,,.##M", CultureInfo.InvariantCulture),
+            > 999_999_999 => value.ToString("0,,,.###B", CultureInfo.InvariantCulture),
+            > 999_999 => value.ToString("0,,.##M", CultureInfo.InvariantCulture),
             > 999 => value.ToString("0,.##K", CultureInfo.InvariantCulture),
             _ => value.ToString("0.#", CultureInfo.InvariantCulture)
         };
@@ -116,7 +207,7 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
 
 public class SkillData
 {
-    public Element SkillElement { get; set; } = null!;
+    public SkillElement SkillElement { get; set; } = null!;
     public RectangleF DisplayBox { get; set; }
     public decimal Value { get; set; }
     public Vector2 DisplayPosition { get; set; }
