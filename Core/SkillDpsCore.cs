@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -74,27 +75,30 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
             if (elementRect.Width <= 1 || elementRect.Height <= 1)
                 continue;
 
-            var labelHeight = Settings.FontSize;
+            var damageValue = CalculateSkillDamage(actorSkill);
+            if (damageValue <= 0)
+                continue;
+
+            var labelText = FormatDamageValue(damageValue);
+            var textSize = Graphics.MeasureText(labelText);
+            const float padding = 2f;
+            var boxWidth = Math.Max(textSize.X + padding * 2f, elementRect.Width);
+            var boxHeight = textSize.Y + padding * 2f;
             var displayRect = new RectangleF(
-                elementRect.X,
-                elementRect.Y - labelHeight - 2f,
-                elementRect.Width,
-                labelHeight);
+                elementRect.Center.X - boxWidth / 2f,
+                elementRect.Y - boxHeight - 2f,
+                boxWidth,
+                boxHeight);
 
             if (hoverTooltip is { IsVisibleLocal: true } &&
                 hoverTooltip.GetClientRectCache.Intersects(displayRect))
                 continue;
 
-            var damageValue = CalculateSkillDamage(actorSkill);
-            if (damageValue <= 0)
-                continue;
-
             _activeSkills.Add(new SkillData
             {
                 SkillElement = skillElement,
-                Value = damageValue,
-                DisplayBox = displayRect,
-                DisplayPosition = new Vector2(displayRect.Center.X, displayRect.Top + labelHeight * 0.5f)
+                LabelText = labelText,
+                DisplayBox = displayRect
             });
         }
 
@@ -174,13 +178,13 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
             if (!skill.SkillElement.IsVisibleLocal)
                 continue;
 
-            Graphics.DrawText(
-                FormatDamageValue(skill.Value),
-                skill.DisplayPosition,
-                Settings.FontColor,
-                FontAlign.Center);
             Graphics.DrawBox(skill.DisplayBox, Settings.BackgroundColor);
             Graphics.DrawFrame(skill.DisplayBox, Settings.BorderColor, 1);
+            Graphics.DrawText(
+                skill.LabelText,
+                skill.DisplayBox.Center,
+                Settings.FontColor,
+                FontAlign.Center | FontAlign.VerticalCenter);
         }
     }
 
@@ -208,7 +212,6 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
 public class SkillData
 {
     public SkillElement SkillElement { get; set; } = null!;
+    public string LabelText { get; set; } = string.Empty;
     public RectangleF DisplayBox { get; set; }
-    public decimal Value { get; set; }
-    public Vector2 DisplayPosition { get; set; }
 }
