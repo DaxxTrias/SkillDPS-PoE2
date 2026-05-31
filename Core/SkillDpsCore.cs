@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
@@ -15,7 +15,7 @@ namespace Skill_DPS.Core;
 public class SkillDpsCore : BaseSettingsPlugin<Settings>
 {
     private readonly List<SkillData> _activeSkills = [];
-    private TimeCache<bool> _cachedValue;
+    private TimeCache<bool>? _cachedValue;
 
     public SkillDpsCore()
     {
@@ -25,8 +25,8 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
     public override void OnLoad()
     {
         Input.RegisterKey(Keys.LControlKey);
-        Settings.UpdateInterval.OnValueChanged += (sender, interval) => _cachedValue.NewTime(interval);
         _cachedValue = new TimeCache<bool>(ProcessSkillDPS, Settings.UpdateInterval);
+        Settings.UpdateInterval.OnValueChanged += (sender, interval) => _cachedValue?.NewTime(interval);
     }
 
     private bool ProcessSkillDPS()
@@ -90,7 +90,7 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
 
     public override void Render()
     {
-        if (!_cachedValue.Value) return;
+        if (_cachedValue?.Value != true) return;
 
         foreach (var skill in _activeSkills.Where(skill =>
                      skill.DisplayBox.Location != Vector2.Zero && skill.SkillElement.IsVisible))
@@ -116,7 +116,7 @@ public class SkillDpsCore : BaseSettingsPlugin<Settings>
 
 public class SkillData
 {
-    public Element SkillElement { get; set; }
+    public Element SkillElement { get; set; } = null!;
     public RectangleF DisplayBox { get; set; }
     public decimal Value { get; set; }
     public Vector2 DisplayPosition { get; set; }
